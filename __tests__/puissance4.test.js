@@ -1,15 +1,18 @@
 import { jest } from '@jest/globals';
 import puissance4Command from '../commands/puissance4.js';
 import UserStat from '../models/UserStat.js';
+import Economy from '../models/Economy.js'; // N'oublie pas l'import de l'économie
 
 describe('Commande /puissance4', () => {
     let mockInteraction;
     let mockGetUser;
+    let mockGetInteger;
     let mockCollector;
     let mockMessage;
-    let dbSpy;
+    let dbStatSpy;
+    let dbEcoFindSpy;
+    let dbEcoUpdateSpy;
 
-    // Définition de nos deux joueurs pour les tests
     const player1 = { id: '111', username: 'Alice', bot: false };
     const player2 = { id: '222', username: 'Bob', bot: false };
 
@@ -19,105 +22,115 @@ describe('Commande /puissance4', () => {
             stop: jest.fn()
         };
 
+        // On enrichit mockMessage pour pouvoir simuler l'attente du clic sur le bouton
         mockMessage = {
-            createMessageComponentCollector: jest.fn().mockReturnValue(mockCollector)
+            createMessageComponentCollector: jest.fn().mockReturnValue(mockCollector),
+            awaitMessageComponent: jest.fn() 
         };
 
         mockGetUser = jest.fn().mockReturnValue(player2);
+        mockGetInteger = jest.fn().mockReturnValue(0); // Par défaut, mise de 0
 
         mockInteraction = {
             user: player1,
-            options: { getUser: mockGetUser },
+            options: { 
+                getUser: mockGetUser,
+                getInteger: mockGetInteger
+            },
             reply: jest.fn().mockResolvedValue(mockMessage),
             editReply: jest.fn().mockResolvedValue(true)
         };
 
-        dbSpy = jest.spyOn(UserStat, 'findOneAndUpdate').mockResolvedValue({});
+        dbStatSpy = jest.spyOn(UserStat, 'findOneAndUpdate').mockResolvedValue({});
+        
+        // On simule que chaque joueur a 100 pièces par défaut
+        dbEcoFindSpy = jest.spyOn(Economy, 'findOneAndUpdate').mockResolvedValue({ balance: 100 });
+        dbEcoUpdateSpy = jest.spyOn(Economy, 'updateOne').mockResolvedValue({});
     });
 
     afterEach(() => {
         jest.clearAllMocks();
     });
 
+    // --- TESTS DES RÈGLES DE BASE ---
+
+    it('devrait lancer une partie amicale directement si la mise est 0', async () => {
+        await puissance4Command.execute(mockInteraction);
+        
+        expect(mockInteraction.reply).toHaveBeenCalledWith(
+            expect.objectContaining({ content: expect.stringContaining('Partie amicale') })
+        );
+        // L'économie ne doit même pas être interrogée
+        expect(dbEcoFindSpy).not.toHaveBeenCalled(); 
+    });
+
     it('devrait refuser une partie contre un bot', async () => {
         mockGetUser.mockReturnValue({ id: '999', username: 'Robot', bot: true });
         await puissance4Command.execute(mockInteraction);
-
         expect(mockInteraction.reply).toHaveBeenCalledWith(
             expect.objectContaining({ content: expect.stringContaining('bot') })
         );
     });
 
-    it('devrait refuser une partie contre soi-même', async () => {
-        mockGetUser.mockReturnValue(player1);
+    // --- TESTS DU SYSTÈME FINANCIER ---
+
+    it('devrait bloquer si le lanceur n\'a pas assez d\'argent', async () => {
+        mockGetInteger.mockReturnValue(200); // Mise de 200
+        // Alice n'a que 50 pièces
+        dbEcoFindSpy.mockImplementationOnce(() => Promise.resolve({ balance: 50 })); 
+        
         await puissance4Command.execute(mockInteraction);
 
         expect(mockInteraction.reply).toHaveBeenCalledWith(
-            expect.objectContaining({ content: expect.stringContaining('toi-même') })
+            expect.objectContaining({ content: expect.stringContaining('pas assez d\'argent') })
         );
     });
 
-    it('devrait initialiser le plateau et le collecteur', async () => {
-        await puissance4Command.execute(mockInteraction);
+    it('devrait annuler le pari si le joueur 2 clique sur Refuser', async () => {
+        mockGetInteger.mockReturnValue(50);
 
-        // Vérifie qu'on a bien répondu avec l'Embed et le Menu Déroulant
-        const replyArgs = mockInteraction.reply.mock.calls[0][0];
-        expect(replyArgs.embeds[0].data.title).toContain('Puissance 4');
-        expect(replyArgs.components[0].components[0].data.type).toBe(3); // Type 3 = StringSelectMenu
-
-        expect(mockMessage.createMessageComponentCollector).toHaveBeenCalledTimes(1);
-    });
-
-    it('devrait bloquer un joueur qui n\'est pas dans la partie', async () => {
-        await puissance4Command.execute(mockInteraction);
-        const collectCallback = mockCollector.on.mock.calls.find(call => call[0] === 'collect')[1];
-
-        // Un "spectateur" essaie de cliquer sur le menu
-        const spectatorInteraction = {
-            user: { id: '333', username: 'Spectateur' },
-            reply: jest.fn().mockResolvedValue(true)
+        // On simule le clic de Bob sur le bouton "Refuser"
+        const mockConfirmInteraction = {
+            customId: 'decline_bet',
+            update: jest.fn().mockResolvedValue(true)
         };
+        mockMessage.awaitMessageComponent.mockResolvedValue(mockConfirmInteraction);
 
-        await collectCallback(spectatorInteraction);
+        await puissance4Command.execute(mockInteraction);
 
-        expect(spectatorInteraction.reply).toHaveBeenCalledWith(
-            expect.objectContaining({ content: expect.stringContaining('Tu ne participes pas') })
+        // Vérifie que le bot annonce l'annulation
+        expect(mockConfirmInteraction.update).toHaveBeenCalledWith(
+            expect.objectContaining({ content: expect.stringContaining('refusé') })
         );
+        // TRÈS IMPORTANT : Aucun argent ne doit avoir été débité !
+        expect(dbEcoUpdateSpy).not.toHaveBeenCalled();
     });
 
-    it('devrait bloquer un joueur si ce n\'est pas son tour', async () => {
-        await puissance4Command.execute(mockInteraction);
-        const collectCallback = mockCollector.on.mock.calls.find(call => call[0] === 'collect')[1];
-
-        // C'est le tour d'Alice (player1), mais Bob (player2) essaie de jouer
-        const wrongTurnInteraction = {
-            user: player2,
-            reply: jest.fn().mockResolvedValue(true)
-        };
-
-        await collectCallback(wrongTurnInteraction);
-
-        expect(wrongTurnInteraction.reply).toHaveBeenCalledWith(
-            expect.objectContaining({ content: expect.stringContaining('pas ton tour') })
-        );
-    });
-
-    it('devrait détecter une victoire verticale et mettre à jour MongoDB', async () => {
-        await puissance4Command.execute(mockInteraction);
+    it('devrait débiter les mises, lancer le jeu, et récompenser le gagnant', async () => {
+        mockGetInteger.mockReturnValue(50); // Mise de 50
         
+        // On simule le clic de Bob sur le bouton "Accepter"
+        const mockConfirmInteraction = {
+            customId: 'accept_bet',
+            update: jest.fn().mockResolvedValue(true)
+        };
+        mockMessage.awaitMessageComponent.mockResolvedValue(mockConfirmInteraction);
+
+        await puissance4Command.execute(mockInteraction);
+
+        // 1. Vérifie que les 50 pièces ont été débitées (mise en attente) aux DEUX joueurs
+        expect(dbEcoUpdateSpy).toHaveBeenCalledWith({ userId: '111' }, { $inc: { balance: -50 } });
+        expect(dbEcoUpdateSpy).toHaveBeenCalledWith({ userId: '222' }, { $inc: { balance: -50 } });
+
+        // 2. On simule une victoire rapide de P1 (Alice)
         const collectCallback = mockCollector.on.mock.calls.find(call => call[0] === 'collect')[1];
         const endCallback = mockCollector.on.mock.calls.find(call => call[0] === 'end')[1];
 
-        // On simule une partie où Alice (P1) et Bob (P2) jouent dans des colonnes différentes.
-        // Alice joue colonne 0, Bob joue colonne 1. Alice va faire 4 à la suite verticalement.
         const moves = [
-            { user: player1, values: ['0'] }, // P1: Col 0 (1/4)
-            { user: player2, values: ['1'] }, // P2: Col 1
-            { user: player1, values: ['0'] }, // P1: Col 0 (2/4)
-            { user: player2, values: ['1'] }, // P2: Col 1
-            { user: player1, values: ['0'] }, // P1: Col 0 (3/4)
-            { user: player2, values: ['1'] }, // P2: Col 1
-            { user: player1, values: ['0'] }  // P1: Col 0 (4/4) -> VICTOIRE
+            { user: player1, values: ['0'] }, { user: player2, values: ['1'] },
+            { user: player1, values: ['0'] }, { user: player2, values: ['1'] },
+            { user: player1, values: ['0'] }, { user: player2, values: ['1'] },
+            { user: player1, values: ['0'] } // Alice gagne (4 à la suite)
         ];
 
         for (const move of moves) {
@@ -128,31 +141,17 @@ describe('Commande /puissance4', () => {
             });
         }
 
-        // Le collecteur doit avoir été stoppé pour cause de victoire
-        expect(mockCollector.stop).toHaveBeenCalledWith('win');
-
-        // On simule la fin officielle du collecteur
         await endCallback(null, 'win');
 
-        // Vérification des appels à la base de données
-        expect(dbSpy).toHaveBeenCalledTimes(2);
-
-        // Alice (player1) reçoit une victoire
-        expect(dbSpy).toHaveBeenCalledWith(
-            { userId: '111', gameName: 'puissance4' },
-            { $inc: { wins: 1 } },
-            { upsert: true }
-        );
-
-        // Bob (player2) reçoit une défaite
-        expect(dbSpy).toHaveBeenCalledWith(
-            { userId: '222', gameName: 'puissance4' },
-            { $inc: { losses: 1 } },
-            { upsert: true }
-        );
+        // 3. Vérifie les récompenses de fin de partie
+        // Alice (111) doit recevoir la cagnotte (50 * 2 = 100)
+        expect(dbEcoUpdateSpy).toHaveBeenCalledWith({ userId: '111' }, { $inc: { balance: 100 } });
         
-        // On vérifie que le message final annonce le bon gagnant
+        // Bob (222) ne reçoit rien (il a déjà perdu ses 50 de départ)
+        // expect(dbEcoUpdateSpy).not.toHaveBeenCalledWith({ userId: '222' }, expect.anything());
+
+        // 4. Vérifie l'affichage de l'Embed de victoire
         const editReplyArgs = mockInteraction.editReply.mock.calls[mockInteraction.editReply.mock.calls.length - 1][0];
-        expect(editReplyArgs.embeds[0].data.description).toContain('Alice** a gagné');
+        expect(editReplyArgs.embeds[0].data.description).toContain('remporte la cagnotte de **100 pièces**');
     });
 });

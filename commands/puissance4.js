@@ -1,5 +1,6 @@
-import { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ComponentType } from 'discord.js';
+import { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ComponentType, ButtonBuilder, ButtonStyle } from 'discord.js';
 import UserStat from '../models/UserStat.js';
+import Economy from '../models/Economy.js';
 
 const ROWS = 6;
 const COLS = 7;
@@ -15,15 +16,76 @@ export default {
             option.setName('adversaire')
                 .setDescription('Le joueur que tu veux affronter')
                 .setRequired(true)
+        ).addIntegerOption(option =>
+            option.setName('mise')
+                .setDescription('Combien veux-tu parier ? (0 pour le fun)')
+                .setMinValue(0)
+                .setRequired(false) // Optionnel, par défaut 0
         ),
 
     async execute(interaction) {
         const player1 = interaction.user;
         const player2 = interaction.options.getUser('adversaire');
+        const bet = interaction.options.getInteger('mise') || 0;
 
         // Petites vérifications de base
         if (player2.bot) return interaction.reply({ content: 'Tu ne peux pas jouer contre un bot !', ephemeral: true });
         if (player1.id === player2.id) return interaction.reply({ content: 'Tu ne peux pas jouer contre toi-même !', ephemeral: true });
+
+        // --- GESTION DE L'ÉCONOMIE ET DU DÉFI ---
+        let p1Wallet, p2Wallet;
+
+        if (bet > 0) {
+            // On récupère ou crée les portefeuilles des deux joueurs
+            p1Wallet = await Economy.findOneAndUpdate({ userId: player1.id }, {}, { upsert: true, new: true, setDefaultsOnInsert: true });
+            p2Wallet = await Economy.findOneAndUpdate({ userId: player2.id }, {}, { upsert: true, new: true, setDefaultsOnInsert: true });
+
+            if (p1Wallet.balance < bet) {
+                return interaction.reply({ content: `Tu n'as pas assez d'argent ! Il te reste ${p1Wallet.balance} 💰.`, ephemeral: true });
+            }
+            if (p2Wallet.balance < bet) {
+                return interaction.reply({ content: `**${player2.username}** n'a pas assez d'argent pour suivre cette mise (Solde: ${p2Wallet.balance} 💰).`, ephemeral: true });
+            }
+
+            // Création des boutons d'acceptation
+            const acceptRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('accept_bet').setLabel('Accepter le défi').setStyle(ButtonStyle.Success),
+                new ButtonBuilder().setCustomId('decline_bet').setLabel('Refuser').setStyle(ButtonStyle.Danger)
+            );
+
+            const challengeResponse = await interaction.reply({
+                content: `⚔️ <@${player2.id}>, **${player1.username}** te défie au Puissance 4 pour **${bet} 💰** !\nAccepte-tu de risquer ta mise ?`,
+                components: [acceptRow],
+                fetchReply: true // Nécessaire pour attacher un collecteur
+            });
+
+            try {
+                // On attend UNIQUEMENT la réponse du Joueur 2 pendant 2 minutes
+                const confirmation = await challengeResponse.awaitMessageComponent({ 
+                    filter: i => i.user.id === player2.id, 
+                    time: 120000 
+                });
+
+                if (confirmation.customId === 'decline_bet') {
+                    await confirmation.update({ content: `❌ **${player2.username}** a refusé le défi.`, components: [] });
+                    return; // Fin de la commande
+                }
+
+                // S'il accepte, on prélève la mise aux DEUX joueurs immédiatement
+                await Economy.updateOne({ userId: player1.id }, { $inc: { balance: -bet } });
+                await Economy.updateOne({ userId: player2.id }, { $inc: { balance: -bet } });
+
+                // On acquitte le bouton et on efface le message de défi
+                await confirmation.update({ content: `✅ Défi accepté ! La cagnotte est de **${bet * 2} 💰**. Préparation du plateau...`, components: [] });
+                
+            } catch (e) {
+                // Si le Joueur 2 ne répond pas dans les temps
+                return interaction.editReply({ content: `⏱️ **${player2.username}** n'a pas répondu au défi à temps.`, components: [] });
+            }
+        } else {
+            // S'il n'y a pas de mise, on passe directement au jeu
+            await interaction.reply({ content: 'Partie amicale lancée ! Préparation du plateau...' });
+        }
 
         // Initialisation de la grille (matrice 6x7 remplie de ronds blancs)
         let grid = Array(ROWS).fill(null).map(() => Array(COLS).fill(EMPTY));
@@ -144,22 +206,30 @@ export default {
         collector.on('end', async (collected, reason) => {
             if (reason === 'win') {
                 const loser = currentPlayer.id === player1.id ? player2 : player1;
+                
+                // Mises à jour des stats
+                await UserStat.findOneAndUpdate({ userId: currentPlayer.id, gameName: 'puissance4' }, { $inc: { wins: 1 } }, { upsert: true });
+                await UserStat.findOneAndUpdate({ userId: loser.id, gameName: 'puissance4' }, { $inc: { losses: 1 } }, { upsert: true });
 
-                // Enregistrement MongoDB pour le gagnant et le perdant
-                await UserStat.findOneAndUpdate(
-                    { userId: currentPlayer.id, gameName: 'puissance4' },
-                    { $inc: { wins: 1 } },
-                    { upsert: true }
-                );
-                await UserStat.findOneAndUpdate(
-                    { userId: loser.id, gameName: 'puissance4' },
-                    { $inc: { losses: 1 } },
-                    { upsert: true }
-                );
+                // Récompense financière
+                let gainText = '';
+                if (bet > 0) {
+                    const pot = bet * 2;
+                    await Economy.updateOne({ userId: currentPlayer.id }, { $inc: { balance: pot } });
+                    gainText = `\n\n💰 Il remporte la cagnotte de **${pot} pièces** !`;
+                }
 
-                await interaction.editReply(generateUI(`🏆 **${currentPlayer.username}** a gagné !`, true));
+                await interaction.editReply(generateUI(`🏆 **${currentPlayer.username}** a gagné !${gainText}`, true));
+
             } else if (reason === 'draw') {
-                await interaction.editReply(generateUI('🤝 Égalité ! La grille est pleine.', true));
+                let refundText = '';
+                if (bet > 0) {
+                    // Remboursement
+                    await Economy.updateOne({ userId: player1.id }, { $inc: { balance: bet } });
+                    await Economy.updateOne({ userId: player2.id }, { $inc: { balance: bet } });
+                    refundText = `\n\n💰 Les mises de **${bet} pièces** ont été remboursées.`;
+                }
+                await interaction.editReply(generateUI(`🤝 Égalité ! La grille est pleine.${refundText}`, true));
             } else {
                 // Timeout
                 await interaction.editReply(generateUI('⏱️ La partie a expiré.', true));
