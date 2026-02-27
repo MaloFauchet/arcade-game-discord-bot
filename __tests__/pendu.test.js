@@ -1,10 +1,12 @@
 import { jest, describe, beforeEach, afterEach } from '@jest/globals';
 import penduCommand from '../commands/pendu.js';
 import { EmbedBuilder } from 'discord.js';
+import UserStat from '../models/UserStat.js';
 
 describe('Commande /pendu', () => {
     let mockInteraction;
     let mockCollector;
+    let dbSpy;
 
     beforeEach(() => {
         // Creation d'un faux collecteur
@@ -23,6 +25,8 @@ describe('Commande /pendu', () => {
                 createMessageCollector: jest.fn().mockReturnValue(mockCollector)
             }
         };
+
+        dbSpy = jest.spyOn(UserStat, 'findOneAndUpdate').mockResolvedValue({});
     });
 
     afterEach(() => {
@@ -138,5 +142,62 @@ describe('Commande /pendu', () => {
         expect(mockInteraction.editReply).toHaveBeenCalledWith(
             expect.objectContaining({ content: expect.stringContaining('expiré') })
         );
+    });
+
+    it('devrait gérer une victoire et ajouter +1 aux victoires dans la BDD', async () => {
+        const mathSpy = jest.spyOn(Math, 'random').mockReturnValue(0);
+        await penduCommand.execute(mockInteraction);
+        
+        const endCallback = mockCollector.on.mock.calls.find(call => call[0] === 'end')[1];
+
+        // On simule directement la fin du jeu avec une victoire
+        await endCallback(null, 'win');
+
+        // On vérifie que la BDD a été appelée avec les bons arguments
+        expect(dbSpy).toHaveBeenCalledTimes(1);
+        expect(dbSpy).toHaveBeenCalledWith(
+            { userId: '123456789', gameName: 'pendu' },
+            { $inc: { wins: 1 } },
+            { upsert: true, new: true }
+        );
+
+        const editReplyArgs = mockInteraction.editReply.mock.calls[0][0];
+        expect(editReplyArgs.embeds[0].data.title).toContain('Gagné');
+
+        mathSpy.mockRestore();
+    });
+
+    it('devrait gérer une défaite et ajouter +1 aux défaites dans la BDD', async () => {
+        const mathSpy = jest.spyOn(Math, 'random').mockReturnValue(0);
+        await penduCommand.execute(mockInteraction);
+        
+        const endCallback = mockCollector.on.mock.calls.find(call => call[0] === 'end')[1];
+
+        // On simule directement la fin du jeu avec une défaite
+        await endCallback(null, 'lose');
+
+        // On vérifie que la BDD a bien reçu l'instruction d'incrémenter les pertes
+        expect(dbSpy).toHaveBeenCalledTimes(1);
+        expect(dbSpy).toHaveBeenCalledWith(
+            { userId: '123456789', gameName: 'pendu' },
+            { $inc: { losses: 1 } },
+            { upsert: true, new: true }
+        );
+
+        const editReplyArgs = mockInteraction.editReply.mock.calls[0][0];
+        expect(editReplyArgs.embeds[0].data.title).toContain('Perdu');
+
+        mathSpy.mockRestore();
+    });
+
+    it('ne devrait pas modifier la BDD si le temps expire', async () => {
+        await penduCommand.execute(mockInteraction);
+        const endCallback = mockCollector.on.mock.calls.find(call => call[0] === 'end')[1];
+
+        // On simule l'expiration
+        await endCallback(null, 'time');
+
+        // La BDD ne doit pas avoir été appelée
+        expect(dbSpy).not.toHaveBeenCalled();
     });
 });

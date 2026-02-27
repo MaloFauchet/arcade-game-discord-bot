@@ -1,0 +1,9 @@
+services:
+  jeux-malo-bot:
+    build:
+      target: dev
+    volumes:
+      # Synchronise ton code en direct
+      - .:/usr/src/app
+      # Isole les modules node du conteneur de ceux de ta machine hôte
+      - /usr/src/app/node_modules

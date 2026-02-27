@@ -1,0 +1,5 @@
+services:
+  jeux-malo-bot:
+    build:
+      target: prod
+    restart: always

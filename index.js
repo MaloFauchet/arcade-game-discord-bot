@@ -1,3 +1,10 @@
+import mongoose from 'mongoose';
+
+const MONGO_URI = 'mongodb://mongodb:27017/discordbot';
+mongoose.connect(MONGO_URI)
+    .then(() => console.log('Connecté à MongoDB'))
+    .catch(err => console.error('Erreur de connexion MongoDB:', err));
+
 import { Client, GatewayIntentBits, Events, Collection } from 'discord.js';
 import fs from 'fs';
 import 'dotenv/config'; // Charge automatiquement le fichier

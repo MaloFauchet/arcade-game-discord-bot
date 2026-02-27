@@ -1,0 +1,49 @@
+name: CI/CD Arcade Bot
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+        with:
+          node-version: '20'
+
+      - name: Installation des dépendances (pour les tests)
+        run: npm ci
+
+      - name: Lancement des tests Jest
+        run: npm test
+
+      # - name: Connexion au GitHub Container Registry (GHCR)
+      #   if: success() # Ne s'exécute que si les tests sont au vert
+      #   uses: docker/login-action@v3
+      #   with:
+      #     registry: ghcr.io
+      #     username: ${{ github.actor }}
+      #     password: ${{ secrets.GITHUB_TOKEN }}
+
+      # - name: Build et Push de l'image Docker (Version Prod)
+      #   if: success()
+      #   uses: docker/build-push-action@v5
+      #   with:
+      #     context: .
+      #     target: prod
+      #     push: true
+      #     # Le nom de l'image sera ghcr.io/ton-pseudo/arcade-bot:latest
+      #     tags: ghcr.io/${{ github.repository_owner }}/arcade-bot:latest
+
+      # - name: Déploiement via le Webhook Portainer
+      #   if: success()
+      #   # Appel de l'URL secrète configurée dans les paramètres de ton dépôt GitHub
+      #   run: curl -X POST ${{ secrets.PORTAINER_WEBHOOK }}
+      

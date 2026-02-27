@@ -1,3 +1,4 @@
+import UserStat from '../models/UserStat.js';
 import { SlashCommandBuilder, EmbedBuilder } from 'discord.js';
 
 const WORDS = ['JAVASCRIPT', 'PROGRAMMATION', 'DISCORD', 'ORDINATEUR', 'DEVELOPPEUR', 'RESEAU', 'APPLICATION'];
@@ -124,9 +125,24 @@ export default {
 	    });
 
 	    collector.on('end', async (collected, reason) => {
+			const userId = interaction.user.id;
+			const gameName = 'pendu';
+
 			if (reason === 'win') {
+				await UserStat.findOneAndUpdate(
+					{userId, gameName},
+					{$inc: {wins: 1}},
+					{upsert: true, new: true}
+				);
+				
 				await interaction.editReply({embeds: [generateEmbed('Gagné')]});
 			} else if (reason === 'lose') {
+				await UserStat.findOneAndUpdate(
+					{userId, gameName},
+					{$inc: {losses: 1}},
+					{upsert: true, new: true}
+				);
+
 				const lose_embed = generateEmbed('Perdu');
 				lose_embed.addFields({name: 'Le mot etait', value: word, inline: false});
 				await interaction.editReply({embeds: [lose_embed]});
